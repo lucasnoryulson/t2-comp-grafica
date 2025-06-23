@@ -96,9 +96,15 @@ bool ComTextura = true;
 // ===== VARIÁVEIS DE CONTROLE DO VEÍCULO =====
 // Posição e direção do veículo
 int DirecaoVeiculo = 0;  // 0 = norte, 1 = leste, 2 = sul, 3 = oeste
-float VelocidadeVeiculo = 0.0f;  // Velocidade atual (0 = parado, 100 = máxima)
+float VelocidadeVeiculo = 0.0f;  // Velocidade atual (0 = parado, 5 = máxima)
 bool VeiculoEmMovimento = false;  // Se o veículo está se movendo
-float VelocidadeMaxima = 8.0f;  // Velocidade em unidades/segundo
+float VelocidadeMaxima = 10.0f;  // Velocidade constante de 10 m/s
+
+// Movimento fluido - direção atual e alvo
+float DirecaoAtual = 0.0f;  // Direção atual em graus (0 = norte, 90 = leste, etc.)
+float DirecaoAlvo = 0.0f;   // Direção alvo em graus
+float VelocidadeRotacao = 180.0f;  // Graus por segundo para rotação
+bool Girando = false;       // Se o veículo está girando
 
 // Combustível
 float CombustivelAtual = 100.0f;  // Combustível atual (0-100%)
@@ -106,6 +112,28 @@ float ConsumoCombustivel = 1.0f;  // Consumo por segundo
 
 // Modo de visualização
 bool ModoPrimeiraPessoa = false;  // true = primeira pessoa, false = terceira pessoa
+
+// Navegação 3D - ângulos de rotação da câmera
+float AnguloVertical = 0.0f;   // Olhar para cima/baixo (-45 a +45 graus)
+float AnguloHorizontal = 0.0f; // Olhar para esquerda/direita (-90 a +90 graus)
+
+// Modelo de bicicleta (carro realista)
+float steeringAngle = 0.0f;         // Ângulo de direção das rodas dianteiras (graus)
+const float maxSteeringAngle = 30.0f; // Ângulo máximo de direção (graus)
+const float steeringSpeed = 20.0f;    // Velocidade de virada das rodas (graus/segundo) - reduzida para menor sensibilidade
+
+// Controle de teclas pressionadas
+bool teclaEsquerdaPressionada = false;
+bool teclaDireitaPressionada = false;
+
+// Controle de colisão
+bool VeiculoParadoPorColisao = false;  // Indica se o veículo está parado por colisão
+
+// Controle de pausa do jogo
+bool gamePaused = false;
+
+// Controle de rotação das rodas
+float anguloGiroRodas = 0.0f;
 
 // ===== DECLARAÇÕES DAS FUNÇÕES DE CONTROLE DO VEÍCULO =====
 void AtualizarPosicaoVeiculo(float deltaTime);
@@ -145,6 +173,9 @@ void ImprimeCidade() {
 
 void InicializaCidade(int qtdX, int qtdZ)
 {
+    int buildingColors[] = {Red, Yellow, Cyan, Magenta, Orange, Brown, Pink};
+    int numBuildingColors = sizeof(buildingColors) / sizeof(buildingColors[0]);
+
     ifstream arquivo("cidade.txt");
     if (!arquivo)
     {
@@ -180,17 +211,12 @@ void InicializaCidade(int qtdX, int qtdZ)
                     Cidade[z][x].tipo = VAZIO;
                     Cidade[z][x].corDoPiso = Blue;
                     break;
-                case 3: // prédio vermelho
+                case 3: // prédio
+                case 4: // prédio
                     Cidade[z][x].tipo = PREDIO;
                     Cidade[z][x].corDoPiso = Green;
-                    Cidade[z][x].corDoObjeto = Red;
-                    Cidade[z][x].altura = 3.0;
-                    break;
-                case 4: // prédio amarelo
-                    Cidade[z][x].tipo = PREDIO;
-                    Cidade[z][x].corDoPiso = Green;
-                    Cidade[z][x].corDoObjeto = Yellow;
-                    Cidade[z][x].altura = 2.0;
+                    Cidade[z][x].corDoObjeto = buildingColors[rand() % numBuildingColors];
+                    Cidade[z][x].altura = 2.0f + (rand() % 60) / 10.0f; // Altura aleatória entre 2.0 e 8.0
                     break;
                 case 5: // cápsula de combustível
                     Cidade[z][x].tipo = COMBUSTIVEL;
@@ -310,6 +336,7 @@ void init(void)
     
     LoadTexture ("bricks.jpg"); // esta serah a textura 0
     LoadTexture ("Piso.jpg"); // esta serah a textura 1
+    LoadTexture ("bricks.jpg"); // esta serah a textura 2 (carro) - usando bricks.jpg como fallback
     UseTexture (-1); // desabilita o uso de textura, inicialmente
     
 }
@@ -318,32 +345,110 @@ void init(void)
 // **********************************************************************
 void animate()
 {
-    double dt;
-    dt = T.getDeltaT();
-    AccumDeltaT += dt;
-    TempoTotal += dt;
-    nFrames++;
-
-    // Atualizar posição do veículo
-    AtualizarPosicaoVeiculo(dt);
-
-    // Atualiza a camera
-    AtualizaCamera();
-
-    if (AccumDeltaT > 1.0/60) // Aumentar para 60 FPS para movimento mais suave
+    if (gamePaused)
     {
-        AccumDeltaT = 0;
-        angulo+= 1;
         glutPostRedisplay();
+        return;
     }
-    if (TempoTotal > 5.0)
+    // Atualizar steering baseado nas teclas pressionadas (sempre permitir)
+    double dt = T.getDeltaT();
+    
+    // Invertido para corrigir o controle: Esquerda -> Aumenta angulo (vira p/ esquerda)
+    if (teclaEsquerdaPressionada) {
+        steeringAngle += steeringSpeed * dt;
+        if (steeringAngle > maxSteeringAngle) steeringAngle = maxSteeringAngle;
+    }
+    // Invertido para corrigir o controle: Direita -> Diminui angulo (vira p/ direita)
+    if (teclaDireitaPressionada) {
+        steeringAngle -= steeringSpeed * dt;
+        if (steeringAngle < -maxSteeringAngle) steeringAngle = -maxSteeringAngle;
+    }
+    
+    // Resetar steering imediatamente quando nenhuma tecla está pressionada
+    if (!teclaEsquerdaPressionada && !teclaDireitaPressionada) {
+        steeringAngle = 0.0f;
+    }
+
+    // Se o veículo NÃO está em movimento, permita que ele gire no lugar
+    if (!VeiculoEmMovimento && steeringAngle != 0.0f)
     {
-        cout << "Tempo Acumulado: "  << TempoTotal << " segundos. " ;
-        cout << "Nros de Frames sem desenho: " << nFrames << endl;
-        cout << "FPS(sem desenho): " << nFrames/TempoTotal << endl;
-        TempoTotal = 0;
-        nFrames = 0;
+        float L = 0.6f; // Distância entre eixos
+        float steerRad = steeringAngle * M_PI / 180.0f;
+        
+        // Simula uma "distância" pequena para calcular a rotação, 
+        // controlando a velocidade do giro no lugar.
+        float distanciaSimulada = 0.5f; 
+        float deltaTheta = 3.0f * ( (distanciaSimulada * dt) / L) * tan(steerRad);
+        
+        float novaDirecao = DirecaoAtual + deltaTheta * 180.0f / M_PI;
+        while (novaDirecao >= 360.0f) novaDirecao -= 360.0f;
+        while (novaDirecao < 0.0f) novaDirecao += 360.0f;
+        
+        DirecaoAtual = novaDirecao;
     }
+
+    // Atualizar posição do veículo se estiver em movimento
+    if (VeiculoEmMovimento && CombustivelAtual > 0.0f)
+    {
+        float distancia = VelocidadeVeiculo * dt;
+        float L = 0.6f; // Distância entre eixos (aprox. comprimento do carro)
+
+        // Atualizar posição usando modelo de bicicleta para virar fluido
+        float rad = DirecaoAtual * M_PI / 180.0f;
+        float steerRad = steeringAngle * M_PI / 180.0f;
+        
+        // Calcular mudança de direção baseada no steering (apenas quando em movimento)
+        float deltaTheta = 3.0f * (distancia / L) * tan(steerRad);
+        float novaDirecao = DirecaoAtual + deltaTheta * 180.0f / M_PI;
+        while (novaDirecao >= 360.0f) novaDirecao -= 360.0f;
+        while (novaDirecao < 0.0f) novaDirecao += 360.0f;
+        
+        // Calcular nova posição baseada na direção atual
+        float novaX = PosicaoVeiculo.x - sin(rad) * distancia;
+        float novaZ = PosicaoVeiculo.z - cos(rad) * distancia;
+
+        // Verificar colisão com limites da cidade
+        if (novaX >= 0.0f && novaX < QtdX && novaZ >= 0.0f && novaZ < QtdZ) {
+            int gridX = (int)novaX;
+            int gridZ = (int)novaZ;
+            if (gridX >= 0 && gridX < QtdX && gridZ >= 0 && gridZ < QtdZ) {
+                if (Cidade[gridZ][gridX].tipo == RUA) {
+                    PosicaoVeiculo.x = novaX;
+                    PosicaoVeiculo.z = novaZ;
+                    DirecaoAtual = novaDirecao;
+                    VeiculoParadoPorColisao = false; // Não está mais parado por colisão
+                    
+                    // Verificar se há cápsula de combustível na posição
+                    if (Cidade[gridZ][gridX].tipo == COMBUSTIVEL) {
+                        CombustivelAtual = min(CombustivelAtual + 25.0f, 100.0f);
+                        Cidade[gridZ][gridX].tipo = RUA;
+                        cout << "Combustível coletado! Nível atual: " << CombustivelAtual << "%" << endl;
+                    }
+                    CombustivelAtual -= ConsumoCombustivel * dt;
+                    if (CombustivelAtual < 0.0f) CombustivelAtual = 0.0f;
+                } else {
+                    VeiculoEmMovimento = false;
+                    VelocidadeVeiculo = 0.0f;
+                    VeiculoParadoPorColisao = true; // Marcar como parado por colisão
+                    cout << "Colisão detectada! Veículo parado. Você pode girar o veículo e pressionar espaço para tentar novamente." << endl;
+                }
+            }
+        } else {
+            VeiculoEmMovimento = false;
+            VelocidadeVeiculo = 0.0f;
+            VeiculoParadoPorColisao = true; // Marcar como parado por colisão
+            cout << "Limite da cidade atingido! Veículo parado. Você pode girar o veículo e pressionar espaço para tentar novamente." << endl;
+        }
+    }
+    
+    // Atualizar rotação das rodas
+    if (VeiculoEmMovimento) {
+        anguloGiroRodas += 360.0f * (VelocidadeVeiculo * dt) / (2.0f * M_PI * 0.1f); // 0.1 é o raio da roda
+    }
+
+    AtualizaCamera();
+    
+    glutPostRedisplay();
 }
 
 // **********************************************************************
@@ -352,10 +457,10 @@ void animate()
 void DesenhaPredio(float altura)
 {
     glPushMatrix();
-       // glTranslatef(0, -1, 0);
-        glScalef(0.2, altura, 0.2);
-        glTranslatef(0, 1, 0);
-        glutSolidCube(1);
+        // Move o pivo para o centro da base do cubo
+        glTranslatef(0, altura/2.0, 0);
+        glScalef(0.9, altura, 0.9); // Escala para o tamanho desejado
+        glutSolidCube(1); // Desenha um cubo unitario
     glPopMatrix();
     
 }
@@ -523,6 +628,8 @@ void DefineLuz(void)
 // **********************************************************************
 void PosicUser()
 {
+    // Atualizar posição da câmera baseada no modo de visualização
+    AtualizaCamera();
 
     // Define os parametros da projecao Perspectiva
     glMatrixMode(GL_PROJECTION);
@@ -642,8 +749,7 @@ void DesenhaEm2D()
     printString(posicao, 0, 5, Cyan);
     
     // Direção
-    string direcoes[] = {"Norte", "Leste", "Sul", "Oeste"};
-    string direcao = "Direção: " + direcoes[DirecaoVeiculo];
+    string direcao = "Direção: " + to_string((int)DirecaoAtual) + "°";
     printString(direcao, 0, 4, Cyan);
     
     // Modo de visualização
@@ -657,6 +763,12 @@ void DesenhaEm2D()
     printString("V: Alternar Visão", 5, 5, White);
     printString("R: Reabastecer", 5, 4, White);
     printString("ESC: Sair", 5, 3, White);
+    
+    // Controles de navegação 3D (apenas em primeira pessoa)
+    if (ModoPrimeiraPessoa) {
+        printString("WASD: Navegar 3D", 5, 2, Yellow);
+        printString("Z: Reset Camera", 5, 1, Yellow);
+    }
 
     // Restaura os parametro que foram alterados
     glMatrixMode(GL_PROJECTION);
@@ -690,10 +802,6 @@ void display( void )
     // Desenhar o veículo
     DesenharVeiculo();
     
-    glPushMatrix();
-    DesenhaPoligonosComTextura();
-    glPopMatrix();
-
     DesenhaEm2D();
 
 	glutSwapBuffers();
@@ -707,55 +815,114 @@ void display( void )
 // **********************************************************************
 void keyboard ( unsigned char key, int x, int y )
 {
-	switch ( key ) 
-	{
-    case 27:        // Termina o programa qdo
-      exit ( 0 );   // a tecla ESC for pressionada
-      break;        
-    case 'p':
-        ModoDeProjecao = !ModoDeProjecao;
-        glutPostRedisplay();
-        break;
-    case 'e':
-        ModoDeExibicao = !ModoDeExibicao;
-        init();
-        glutPostRedisplay();
-        break;
-    case 't':
-        ComTextura = !ComTextura;
-        break;
-    case ' ':       // Tecla ESPAÇO - andar/parar
-        if (CombustivelAtual > 0.0f)
-        {
-            VeiculoEmMovimento = !VeiculoEmMovimento;
-            if (VeiculoEmMovimento)
-            {
-                VelocidadeVeiculo = VelocidadeMaxima;
-                cout << "Veículo iniciou movimento!" << endl;
-            }
-            else
-            {
+    switch ( key ) {
+        case 27:     // Tecla "ESC" pressionada
+            exit ( 0 );
+            break;
+        case ' ':    // Barra de espaço - iniciar/parar movimento
+            if (!VeiculoEmMovimento && CombustivelAtual > 0.0f) {
+                // Se o veículo está parado por colisão, verificar se a direção atual é válida
+                if (VeiculoParadoPorColisao) {
+                    // Verificar se a direção atual leva a uma posição válida
+                    float rad = DirecaoAtual * M_PI / 180.0f;
+                    float distancia = 1.0f; // Verificar 1 unidade à frente
+                    float novaX = PosicaoVeiculo.x - sin(rad) * distancia;
+                    float novaZ = PosicaoVeiculo.z - cos(rad) * distancia;
+                    
+                    // Verificar se a nova posição é válida
+                    if (novaX >= 0.0f && novaX < QtdX && novaZ >= 0.0f && novaZ < QtdZ) {
+                        int gridX = (int)novaX;
+                        int gridZ = (int)novaZ;
+                        if (gridX >= 0 && gridX < QtdX && gridZ >= 0 && gridZ < QtdZ) {
+                            if (Cidade[gridZ][gridX].tipo == RUA) {
+                                VeiculoEmMovimento = true;
+                                VelocidadeVeiculo = VelocidadeMaxima; // Usar 10 m/s
+                                VeiculoParadoPorColisao = false;
+                                cout << "Veículo iniciou movimento! Direção válida encontrada." << endl;
+                            } else {
+                                cout << "Direção ainda inválida! Gire o veículo para uma direção livre." << endl;
+                            }
+                        } else {
+                            cout << "Direção ainda inválida! Gire o veículo para uma direção livre." << endl;
+                        }
+                    } else {
+                        cout << "Direção ainda inválida! Gire o veículo para uma direção livre." << endl;
+                    }
+                } else {
+                    // Veículo não estava parado por colisão, iniciar normalmente
+                    VeiculoEmMovimento = true;
+                    VelocidadeVeiculo = VelocidadeMaxima; // Usar 10 m/s
+                    cout << "Veículo iniciou movimento!" << endl;
+                }
+            } else {
+                VeiculoEmMovimento = false;
                 VelocidadeVeiculo = 0.0f;
-                cout << "Veículo parado!" << endl;
+                cout << "Veículo parou!" << endl;
             }
-        }
-        else
-        {
-            cout << "Sem combustível! Reabasteça primeiro." << endl;
-        }
-        break;
-    case 'v':       // Tecla V - alternar visualização
-        AlternarModoVisualizacao();
-        glutPostRedisplay();
-        break;
-    case 'r':       // Tecla R - reabastecer (para testes)
-        CombustivelAtual = 100.0f;
-        cout << "Combustível reabastecido manualmente!" << endl;
-        break;
-    default:
-            cout << key;
-    break;
-  }
+            break;
+        case 'v':
+        case 'V':    // Tecla 'V' - alternar modo de visualização
+            AlternarModoVisualizacao();
+            break;
+        case 'r':
+        case 'R':    // Tecla 'R' - resetar câmera
+            if (ModoPrimeiraPessoa) {
+                AnguloVertical = 0.0f;
+                AnguloHorizontal = 0.0f;
+                cout << "Câmera resetada!" << endl;
+            } else {
+                PosicionaEmTerceiraPessoa();
+                cout << "Câmera resetada!" << endl;
+            }
+            break;
+        case 'p':
+        case 'P':    // Tecla 'P' - alternar modo de projeção
+            ModoDeProjecao = !ModoDeProjecao;
+            break;
+        case 'w':
+        case 'W':    // Tecla 'W' - alternar modo de exibição
+            ModoDeExibicao = !ModoDeExibicao;
+            if (ModoDeExibicao)
+                glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+            else
+                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+            break;
+        case 't':
+        case 'T':    // Tecla 'T' - alternar texturas
+            ComTextura = !ComTextura;
+            break;
+        case 's':
+        case 'S':       // Tecla S - olhar para baixo
+            if (ModoPrimeiraPessoa) {
+                AnguloVertical = max(AnguloVertical - 5.0f, -45.0f);
+                cout << "Olhando para baixo: " << AnguloVertical << "°" << endl;
+            }
+            break;
+        case 'a':
+        case 'A':       // Tecla A - olhar para esquerda
+            if (ModoPrimeiraPessoa) {
+                AnguloHorizontal = max(AnguloHorizontal - 5.0f, -45.0f);
+                cout << "Olhando para esquerda: " << AnguloHorizontal << "°" << endl;
+            }
+            break;
+        case 'd':
+        case 'D':       // Tecla D - olhar para direita
+            if (ModoPrimeiraPessoa) {
+                AnguloHorizontal = min(AnguloHorizontal + 5.0f, 90.0f);
+                cout << "Olhando para direita: " << AnguloHorizontal << "°" << endl;
+            }
+            break;
+        case 'z':
+        case 'Z':       // Tecla Z - resetar câmera
+            if (ModoPrimeiraPessoa) {
+                AnguloVertical = 0.0f;
+                AnguloHorizontal = 0.0f;
+                cout << "Câmera resetada!" << endl;
+            }
+            break;
+        default:
+            break;
+    }
 }
 
 // **********************************************************************
@@ -765,47 +932,34 @@ void keyboard ( unsigned char key, int x, int y )
 // **********************************************************************
 void arrow_keys ( int a_keys, int x, int y )  
 {
-	switch ( a_keys ) 
-	{
-		case GLUT_KEY_UP:       // When Up Arrow Is Pressed...
-			glutFullScreen ( ); // Go Into Full Screen Mode
-			break;
-	    case GLUT_KEY_DOWN:     // When Down Arrow Is Pressed...
-			glutInitWindowSize  ( 700, 500 ); 
-			break;
-		case GLUT_KEY_LEFT:     // Seta esquerda - virar à esquerda
-			DirecaoVeiculo = (DirecaoVeiculo - 1 + 4) % 4;  // Virar à esquerda (0->3, 1->0, 2->1, 3->2)
-			
-			// Verificar se a direção é válida
-			if (DirecaoVeiculo < 0 || DirecaoVeiculo > 3)
-			{
-				cout << "ERRO: Direção do veículo inválida! Resetando..." << endl;
-				DirecaoVeiculo = 0;
-			}
-			
-			{
-				string direcoes[] = {"Norte", "Leste", "Sul", "Oeste"};
-				cout << "Direção: " << direcoes[DirecaoVeiculo] << endl;
-			}
-			break;
-		case GLUT_KEY_RIGHT:    // Seta direita - virar à direita
-			DirecaoVeiculo = (DirecaoVeiculo + 1) % 4;  // Virar à direita (0->1, 1->2, 2->3, 3->0)
-			
-			// Verificar se a direção é válida
-			if (DirecaoVeiculo < 0 || DirecaoVeiculo > 3)
-			{
-				cout << "ERRO: Direção do veículo inválida! Resetando..." << endl;
-				DirecaoVeiculo = 0;
-			}
-			
-			{
-				string direcoes[] = {"Norte", "Leste", "Sul", "Oeste"};
-				cout << "Direção: " << direcoes[DirecaoVeiculo] << endl;
-			}
-			break;
-		default:
-			break;
-	}
+    switch ( a_keys ) {
+        case GLUT_KEY_LEFT:  // Seta para esquerda
+            teclaEsquerdaPressionada = true;
+            break;
+        case GLUT_KEY_RIGHT: // Seta para direita
+            teclaDireitaPressionada = true;
+            break;
+        case GLUT_KEY_UP:
+        case GLUT_KEY_DOWN:
+        default:
+            break;
+    }
+}
+
+void arrow_keys_up ( int a_keys, int x, int y )  
+{
+    switch ( a_keys ) {
+        case GLUT_KEY_LEFT:  // Seta para esquerda
+            teclaEsquerdaPressionada = false;
+            break;
+        case GLUT_KEY_RIGHT: // Seta para direita
+            teclaDireitaPressionada = false;
+            break;
+        case GLUT_KEY_UP:
+        case GLUT_KEY_DOWN:
+        default:
+            break;
+    }
 }
 
 // **********************************************************************
@@ -863,6 +1017,10 @@ int  main ( int argc, char** argv )
     // automaticamente sempre o usuario
     // pressionar uma tecla especial
     glutSpecialFunc ( arrow_keys );
+
+    // Define que o tratador de evento para
+    // quando as teclas especiais são soltas
+    glutSpecialUpFunc ( arrow_keys_up );
 
     // inicia o tratamento dos eventos
     glutMainLoop ( );
@@ -972,44 +1130,108 @@ void AtualizarPosicaoVeiculo(float deltaTime)
 void AlternarModoVisualizacao()
 {
     ModoPrimeiraPessoa = !ModoPrimeiraPessoa;
-    
-    // A atualização da câmera (1a ou 3a pessoa) acontecerá no animate()
-    cout << "Modo de visualização alterado para: "
-         << (ModoPrimeiraPessoa ? "Primeira Pessoa" : "Terceira Pessoa") << endl;
+    cout << "Modo de visualização alterado para: " << (ModoPrimeiraPessoa ? "Primeira Pessoa" : "Terceira Pessoa") << endl;
 }
 
 void DesenharVeiculo()
 {
+    glPushMatrix(); // Salva a matriz de transformação atual
+    glTranslatef(PosicaoVeiculo.x, 0.15f, PosicaoVeiculo.z);
+    
+    glRotatef(DirecaoAtual, 0, 1, 0);
+    
+    // Habilitar textura para o carro
+    if (ComTextura)
+        glEnable(GL_TEXTURE_2D);
+    UseTexture(2);
+    
+    // Desenhar o corpo principal do carro com textura
     glPushMatrix();
-    glTranslatef(PosicaoVeiculo.x, 0.3f, PosicaoVeiculo.z);
+    glScalef(0.3f, 0.15f, 0.6f); // Dimensões do veículo (proporcionais às ruas)
     
-    // Converter direção para ângulo em graus
-    float anguloRotacao = 0.0f;
-    switch (DirecaoVeiculo)
-    {
-        case 0: // Norte
-            anguloRotacao = 0.0f;
-            break;
-        case 1: // Leste
-            anguloRotacao = 90.0f;
-            break;
-        case 2: // Sul
-            anguloRotacao = 180.0f;
-            break;
-        case 3: // Oeste
-            anguloRotacao = 270.0f;
-            break;
-        default:
-            anguloRotacao = 0.0f;
-            break;
-    }
+    // Corpo principal do carro (lateral)
+    glBegin(GL_QUADS);
+    // Frente
+    glNormal3f(0, 0, -1);
+    glTexCoord2f(0.0f, 0.0f); glVertex3f(-1.0f, -1.0f, -1.0f);
+    glTexCoord2f(1.0f, 0.0f); glVertex3f( 1.0f, -1.0f, -1.0f);
+    glTexCoord2f(1.0f, 1.0f); glVertex3f( 1.0f,  1.0f, -1.0f);
+    glTexCoord2f(0.0f, 1.0f); glVertex3f(-1.0f,  1.0f, -1.0f);
     
-    glRotatef(anguloRotacao, 0, 1, 0);
+    // Traseira
+    glNormal3f(0, 0, 1);
+    glTexCoord2f(0.0f, 0.0f); glVertex3f(-1.0f, -1.0f,  1.0f);
+    glTexCoord2f(1.0f, 0.0f); glVertex3f( 1.0f, -1.0f,  1.0f);
+    glTexCoord2f(1.0f, 1.0f); glVertex3f( 1.0f,  1.0f,  1.0f);
+    glTexCoord2f(0.0f, 1.0f); glVertex3f(-1.0f,  1.0f,  1.0f);
     
-    // Desenhar o veículo como um paralelepípedo vermelho
-    defineCor(Red);
-    glScalef(0.4f, 0.2f, 0.8f); // Dimensões do veículo
-    glutSolidCube(1.0f);
+    // Lateral esquerda
+    glNormal3f(-1, 0, 0);
+    glTexCoord2f(0.0f, 0.0f); glVertex3f(-1.0f, -1.0f, -1.0f);
+    glTexCoord2f(1.0f, 0.0f); glVertex3f(-1.0f, -1.0f,  1.0f);
+    glTexCoord2f(1.0f, 1.0f); glVertex3f(-1.0f,  1.0f,  1.0f);
+    glTexCoord2f(0.0f, 1.0f); glVertex3f(-1.0f,  1.0f, -1.0f);
+    
+    // Lateral direita
+    glNormal3f(1, 0, 0);
+    glTexCoord2f(0.0f, 0.0f); glVertex3f( 1.0f, -1.0f, -1.0f);
+    glTexCoord2f(1.0f, 0.0f); glVertex3f( 1.0f, -1.0f,  1.0f);
+    glTexCoord2f(1.0f, 1.0f); glVertex3f( 1.0f,  1.0f,  1.0f);
+    glTexCoord2f(0.0f, 1.0f); glVertex3f( 1.0f,  1.0f, -1.0f);
+    
+    // Teto
+    glNormal3f(0, 1, 0);
+    glTexCoord2f(0.0f, 0.0f); glVertex3f(-1.0f,  1.0f, -1.0f);
+    glTexCoord2f(1.0f, 0.0f); glVertex3f( 1.0f,  1.0f, -1.0f);
+    glTexCoord2f(1.0f, 1.0f); glVertex3f( 1.0f,  1.0f,  1.0f);
+    glTexCoord2f(0.0f, 1.0f); glVertex3f(-1.0f,  1.0f,  1.0f);
+    
+    // Base
+    glNormal3f(0, -1, 0);
+    glTexCoord2f(0.0f, 0.0f); glVertex3f(-1.0f, -1.0f, -1.0f);
+    glTexCoord2f(1.0f, 0.0f); glVertex3f( 1.0f, -1.0f, -1.0f);
+    glTexCoord2f(1.0f, 1.0f); glVertex3f( 1.0f, -1.0f,  1.0f);
+    glTexCoord2f(0.0f, 1.0f); glVertex3f(-1.0f, -1.0f,  1.0f);
+    glEnd();
+    
+    glPopMatrix();
+    
+    // Desabilitar textura para as rodas
+    if (ComTextura)
+        glDisable(GL_TEXTURE_2D);
+    
+    // Desenhar rodas (pretas)
+    defineCor(Black);
+    
+    // Roda dianteira esquerda
+    glPushMatrix();
+    glTranslatef(-0.25f, -0.08f, -0.45f);
+    glRotatef(steeringAngle, 0, 1, 0); // Girar a roda conforme steeringAngle
+    glScalef(0.08f, 0.08f, 0.08f);
+    glutSolidSphere(1.0f, 8, 8);
+    glPopMatrix();
+    
+    // Roda dianteira direita
+    glPushMatrix();
+    glTranslatef(0.25f, -0.08f, -0.45f);
+    glRotatef(steeringAngle, 0, 1, 0); // Girar a roda conforme steeringAngle
+    glScalef(0.08f, 0.08f, 0.08f);
+    glutSolidSphere(1.0f, 8, 8);
+    glPopMatrix();
+    
+    // Roda traseira esquerda
+    glPushMatrix();
+    glTranslatef(-0.25f, -0.08f, 0.45f);
+    glScalef(0.08f, 0.08f, 0.08f);
+    glutSolidSphere(1.0f, 8, 8);
+    glPopMatrix();
+    
+    // Roda traseira direita
+    glPushMatrix();
+    glTranslatef(0.25f, -0.08f, 0.45f);
+    glScalef(0.08f, 0.08f, 0.08f);
+    glutSolidSphere(1.0f, 8, 8);
+    glPopMatrix();
     
     glPopMatrix();
 }
@@ -1035,74 +1257,39 @@ Ponto EncontrarPosicaoInicialValida()
 
 void AtualizaCamera()
 {
-    // Verificar se as variáveis estão inicializadas corretamente
     if (ModoPrimeiraPessoa)
     {
-        // Primeira pessoa: câmera na posição do veículo
-        
-        // Verificar se a posição do veículo é válida
-        if (isnan(PosicaoVeiculo.x) || isnan(PosicaoVeiculo.z))
-        {
-            cout << "ERRO: Posição do veículo inválida!" << endl;
-            return;
-        }
-        
+        // 1) posição dos "olhos"
         Observador = PosicaoVeiculo;
-        Observador.y = 0.5f; // Altura dos "olhos" do motorista
-        
-        // Calcular alvo baseado na direção atual (4 direções fixas)
+        Observador.y = 0.5f;
+
+        // 2) parâmetros de olhar
         float distanciaOlhar = 2.0f;
-        switch (DirecaoVeiculo)
-        {
-            case 0: // Norte
-                Alvo.x = PosicaoVeiculo.x;
-                Alvo.z = PosicaoVeiculo.z - distanciaOlhar;
-                break;
-            case 1: // Leste
-                Alvo.x = PosicaoVeiculo.x + distanciaOlhar;
-                Alvo.z = PosicaoVeiculo.z;
-                break;
-            case 2: // Sul
-                Alvo.x = PosicaoVeiculo.x;
-                Alvo.z = PosicaoVeiculo.z + distanciaOlhar;
-                break;
-            case 3: // Oeste
-                Alvo.x = PosicaoVeiculo.x - distanciaOlhar;
-                Alvo.z = PosicaoVeiculo.z;
-                break;
-            default:
-                Alvo.x = PosicaoVeiculo.x;
-                Alvo.z = PosicaoVeiculo.z - distanciaOlhar;
-                break;
-        }
-        Alvo.y = 0.5f;
-        
-        // Verificar se o alvo é válido
-        if (isnan(Alvo.x) || isnan(Alvo.z))
-        {
-            cout << "ERRO: Alvo da câmera inválido!" << endl;
-            Alvo = PosicaoVeiculo; // Fallback para posição do veículo
-        }
+        float rad = DirecaoAtual * M_PI / 180.0f;
+        // Vetor "para frente" do carro, alinhado com o movimento
+        float fx = -sin(rad);
+        float fz = -cos(rad);
+
+        // Rotação da câmera (yaw/horizontal)
+        float cosH = cos(AnguloHorizontal * M_PI / 180.0f);
+        float sinH = sin(AnguloHorizontal * M_PI / 180.0f);
+        float dx = fx * cosH - fz * sinH;
+        float dz = fx * sinH + fz * cosH;
+
+        // Rotação da câmera (pitch/vertical)
+        float pitchCos = cos(AnguloVertical * M_PI / 180.0f);
+        float pitchSin = sin(AnguloVertical * M_PI / 180.0f);
+
+        // 3) Ponto final para onde a câmera olha
+        Alvo.x = Observador.x + dx * pitchCos * distanciaOlhar;
+        Alvo.z = Observador.z + dz * pitchCos * distanciaOlhar;
+        Alvo.y = Observador.y + pitchSin * distanciaOlhar;
     }
     else
     {
         // Terceira pessoa: câmera olha para o veículo
-        // Verificar se a posição de terceira pessoa é válida
-        if (isnan(TerceiraPessoa.x) || isnan(TerceiraPessoa.z))
-        {
-            cout << "ERRO: Posição de terceira pessoa inválida!" << endl;
-            TerceiraPessoa = Ponto(25, 10, 55); // Posição padrão
-        }
-        
-        Observador = TerceiraPessoa; // Garante que a camera está na posição de 3a pessoa
+        Observador = TerceiraPessoa;
         Alvo = PosicaoVeiculo;
-        
-        // Verificar se o alvo é válido
-        if (isnan(Alvo.x) || isnan(Alvo.z))
-        {
-            cout << "ERRO: Alvo da câmera inválido!" << endl;
-            Alvo = Ponto(0, 0, 0); // Fallback para origem
-        }
     }
 }
 
